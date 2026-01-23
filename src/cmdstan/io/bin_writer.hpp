@@ -13,10 +13,10 @@ namespace io {
 
 /**
  * Binary writer for Stan MCMC output.
- * 
+ *
  * Writes raw 64-bit doubles in row-major order to a .bin file,
  * with a companion .meta file containing dimensions and column names.
- * 
+ *
  */
 class bin_writer : public stan::callbacks::writer {
  private:
@@ -31,7 +31,7 @@ class bin_writer : public stan::callbacks::writer {
  public:
   /**
    * Construct a binary writer.
-   * 
+   *
    * @param base_path Path without extension. Will create {base_path}.bin
    *                  and {base_path}.meta files.
    */
@@ -150,24 +150,24 @@ class bin_writer : public stan::callbacks::writer {
     if (finalized_) {
       return;
     }
-    
+
     if (data_stream_.is_open()) {
       data_stream_.close();
     }
-    
+
     write_metadata();
     finalized_ = true;
-    
-    std::cerr << "Binary output: " << num_rows_ << " samples, " 
-              << num_cols_ << " parameters written to " 
-              << base_path_ << ".bin" << std::endl;
+
+    std::cerr << "Binary output: " << num_rows_ << " samples, "
+              << num_cols_ << " parameters written to "
+              << base_path_ + ".bin" << std::endl;
   }
 
   std::size_t num_rows() const { return num_rows_; }
   std::size_t num_cols() const { return num_cols_; }
   bool is_finalized() const { return finalized_; }
 
- private:
+  private:
   void write_metadata() {
     std::ofstream meta(base_path_ + ".meta", std::ios::trunc);
     if (!meta) {

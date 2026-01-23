@@ -29,6 +29,10 @@
 #include <stan/io/stan_csv_reader.hpp>
 #include <stan/io/json/json_data.hpp>
 #include <cmdstan/io/bin_writer.hpp>
+#include <cmdstan/io/nanoarrow_writer.hpp>
+#include <cmdstan/io/arrow_writer.hpp>
+#include <cmdstan/io/beve_writer.hpp>
+#include <cmdstan/io/stanbin_writer.hpp>
 #include <stan/model/model_base.hpp>
 #include <stan/services/diagnose/diagnose.hpp>
 #include <stan/services/experimental/advi/fullrank.hpp>
@@ -179,14 +183,14 @@ int command(int argc, const char *argv[]) {
   auto user_method = parser.arg("method");
   int sig_figs = get_arg_val<int_argument>(parser, "output", "sig_figs");
   int refresh = get_arg_val<int_argument>(parser, "output", "refresh");
-  std::string output_file
-      = get_arg_val<string_argument>(parser, "output", "file");
-  std::string diagnostic_file
-      = get_arg_val<string_argument>(parser, "output", "diagnostic_file");
-  std::string output_format
-      = get_arg_val<string_argument>(parser, "output", "format");
+   std::string output_file
+       = get_arg_val<string_argument>(parser, "output", "file");
+   std::string diagnostic_file
+       = get_arg_val<string_argument>(parser, "output", "diagnostic_file");
+   std::string output_format
+       = get_arg_val<string_argument>(parser, "output", "format");
 
-  stan::callbacks::interrupt interrupt;
+   stan::callbacks::interrupt interrupt;
   stan::callbacks::json_writer<std::ofstream> dummy_json_writer;  // pathfinder
   stan::callbacks::writer init_writer;  // unused - save param initializations
   std::vector<stan::callbacks::writer> init_writers{num_chains,
@@ -199,11 +203,28 @@ int command(int argc, const char *argv[]) {
       diagnostic_json_writers;
   std::vector<stan::callbacks::json_writer<std::ofstream>> metric_json_writers;
 
-  // Binary writers for format=bin option
-  std::vector<io::bin_writer> bin_sample_writers;
-  bool use_binary_format = (output_format == "bin");
+   // Binary writers for format=bin option
+   std::vector<io::bin_writer> bin_sample_writers;
+   bool use_binary_format = (output_format == "bin");
 
-  bool save_single_paths
+   // nanoarrow writers for format=arrow option
+   std::vector<io::nanoarrow_writer> nanoarrow_sample_writers;
+   bool use_arrow_format = (output_format == "arrow");
+
+   // Arrow (full library) writers for parquet/feather
+   std::vector<io::arrow_writer> arrow_sample_writers;
+   bool use_parquet_format = (output_format == "parquet");
+   bool use_feather_format = (output_format == "feather");
+
+    // BEVE writers
+    std::vector<io::bevel_writer> bevel_sample_writers;
+    bool use_bevel_format = (output_format == "beve");
+
+    // Stanbin writers for format=stanbin option (single-file binary)
+    std::vector<io::stanbin_writer> stanbin_sample_writers;
+    bool use_stanbin_format = (output_format == "stanbin");
+
+   bool save_single_paths
       = user_method->arg("pathfinder")
         && (get_arg_val<bool_argument>(parser, "method", "pathfinder",
                                        "save_single_paths"));
@@ -235,24 +256,109 @@ int command(int argc, const char *argv[]) {
     }
     init_null_writers(diagnostic_csv_writers, num_chains);
   } else {
-    if (use_binary_format) {
-      // Initialize binary writers
-      bin_sample_writers.reserve(num_chains);
+     if (use_binary_format) {
+       // Initialize binary writers
+       bin_sample_writers.reserve(num_chains);
+       std::string base_path = output_file;
+       // Strip .csv extension if present
+         if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
+          base_path = base_path.substr(0, base_path.size() - 4);
+        }
+        if (num_chains == 1) {
+           bin_sample_writers.emplace_back(base_path);
+        } else {
+          for (unsigned int i = 0; i < num_chains; ++i) {
+             bin_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i));
+          }
+        }
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else if (use_parquet_format) {
+       // Initialize Arrow writers for Parquet format
+       arrow_sample_writers.reserve(num_chains);
+       std::string base_path = output_file;
+       // Strip .csv extension if present
+       if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
+         base_path = base_path.substr(0, base_path.size() - 4);
+       }
+       if (num_chains == 1) {
+         arrow_sample_writers.emplace_back(base_path + ".parquet", io::ArrowFormat::PARQUET);
+       } else {
+         for (unsigned int i = 0; i < num_chains; ++i) {
+           arrow_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i) + ".parquet", io::ArrowFormat::PARQUET);
+         }
+       }
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else if (use_feather_format) {
+       // Initialize Arrow writers for Feather format
+       arrow_sample_writers.reserve(num_chains);
+       std::string base_path = output_file;
+       // Strip .csv extension if present
+       if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
+         base_path = base_path.substr(0, base_path.size() - 4);
+       }
+       if (num_chains == 1) {
+         arrow_sample_writers.emplace_back(base_path + ".feather", io::ArrowFormat::FEATHER);
+       } else {
+         for (unsigned int i = 0; i < num_chains; ++i) {
+           arrow_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i) + ".feather", io::ArrowFormat::FEATHER);
+         }
+       }
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else if (use_bevel_format) {
+       // Initialize BEVE writers
+       bevel_sample_writers.reserve(num_chains);
+       std::string base_path = output_file;
+       // Strip .csv extension if present
+       if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
+         base_path = base_path.substr(0, base_path.size() - 4);
+       }
+       if (num_chains == 1) {
+         bevel_sample_writers.emplace_back(base_path);
+       } else {
+         for (unsigned int i = 0; i < num_chains; ++i) {
+           bevel_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i));
+         }
+       }
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else if (use_arrow_format) {
+      // Initialize nanoarrow writers
+      nanoarrow_sample_writers.reserve(num_chains);
       std::string base_path = output_file;
       // Strip .csv extension if present
       if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
         base_path = base_path.substr(0, base_path.size() - 4);
       }
       if (num_chains == 1) {
-        bin_sample_writers.emplace_back(base_path);
+        nanoarrow_sample_writers.emplace_back(base_path + ".arrow");
       } else {
         for (unsigned int i = 0; i < num_chains; ++i) {
-          bin_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i));
+          nanoarrow_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i) + ".arrow");
         }
       }
-      // Also initialize empty CSV writers for compatibility (some code paths check size)
-      init_null_writers(sample_writers, num_chains);
-    } else {
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else if (use_stanbin_format) {
+       // Initialize stanbin writers (single-file binary format)
+       stanbin_sample_writers.reserve(num_chains);
+       std::string base_path = output_file;
+       // Strip .csv extension if present
+        if (base_path.size() > 4 && base_path.substr(base_path.size() - 4) == ".csv") {
+          base_path = base_path.substr(0, base_path.size() - 4);
+        }
+        if (num_chains == 1) {
+          stanbin_sample_writers.emplace_back(base_path);
+        } else {
+          for (unsigned int i = 0; i < num_chains; ++i) {
+            stanbin_sample_writers.emplace_back(base_path + "_" + std::to_string(id + i));
+          }
+        }
+       // Also initialize empty CSV writers for compatibility (some code paths check size)
+       init_null_writers(sample_writers, num_chains);
+     } else {
       init_filestream_writers(sample_writers, num_chains, id, output_file, "",
                               ".csv", sig_figs, "# ");
     }
@@ -316,16 +422,16 @@ int command(int argc, const char *argv[]) {
     write_config(json_args, parser, model);
   }
 
-  for (int i = 0; i < num_chains; ++i) {
-    if (use_binary_format) {
-      // Binary format skips config writing (metadata handled separately)
-    } else {
-      write_config(sample_writers[i], parser, model);
+     for (int i = 0; i < num_chains; ++i) {
+       if (use_binary_format || use_stanbin_format || use_parquet_format || use_feather_format || use_bevel_format || use_arrow_format) {
+         // Binary/Arrow/Parquet/Feather/BEVE format skips config writing (metadata handled separately)
+       } else {
+        write_config(sample_writers[i], parser, model);
+      }
+      write_stan(diagnostic_csv_writers[i]);
+      write_model(diagnostic_csv_writers[i], model.model_name());
+      parser.print(diagnostic_csv_writers[i]);
     }
-    write_stan(diagnostic_csv_writers[i]);
-    write_model(diagnostic_csv_writers[i], model.model_name());
-    parser.print(diagnostic_csv_writers[i]);
-  }
 
   //////////////////////////////////////////////////
   //            Invoke Services                   //
@@ -611,19 +717,39 @@ int command(int argc, const char *argv[]) {
       throw std::invalid_argument(msg.str());
     }
 
-    if (algo_name == "fixed_param") {
-      if (use_binary_format) {
-        return_code = stan::services::sample::fixed_param(
-            model, num_chains, init_contexts, random_seed, id, init_radius,
-            num_samples, num_thin, refresh, interrupt, logger, init_writers,
-            bin_sample_writers, diagnostic_csv_writers);
-      } else {
-        return_code = stan::services::sample::fixed_param(
-            model, num_chains, init_contexts, random_seed, id, init_radius,
-            num_samples, num_thin, refresh, interrupt, logger, init_writers,
-            sample_writers, diagnostic_csv_writers);
-      }
-    } else if (algo_name == "hmc") {
+     if (algo_name == "fixed_param") {
+        if (use_binary_format) {
+          return_code = stan::services::sample::fixed_param(
+              model, num_chains, init_contexts, random_seed, id, init_radius,
+              num_samples, num_thin, refresh, interrupt, logger, init_writers,
+              bin_sample_writers, diagnostic_csv_writers);
+        } else if (use_stanbin_format) {
+          return_code = stan::services::sample::fixed_param(
+              model, num_chains, init_contexts, random_seed, id, init_radius,
+              num_samples, num_thin, refresh, interrupt, logger, init_writers,
+              stanbin_sample_writers, diagnostic_csv_writers);
+        } else if (use_parquet_format || use_feather_format) {
+         return_code = stan::services::sample::fixed_param(
+             model, num_chains, init_contexts, random_seed, id, init_radius,
+             num_samples, num_thin, refresh, interrupt, logger, init_writers,
+             arrow_sample_writers, diagnostic_csv_writers);
+       } else if (use_bevel_format) {
+         return_code = stan::services::sample::fixed_param(
+             model, num_chains, init_contexts, random_seed, id, init_radius,
+             num_samples, num_thin, refresh, interrupt, logger, init_writers,
+             bevel_sample_writers, diagnostic_csv_writers);
+       } else if (use_arrow_format) {
+         return_code = stan::services::sample::fixed_param(
+             model, num_chains, init_contexts, random_seed, id, init_radius,
+             num_samples, num_thin, refresh, interrupt, logger, init_writers,
+             nanoarrow_sample_writers, diagnostic_csv_writers);
+       } else {
+         return_code = stan::services::sample::fixed_param(
+             model, num_chains, init_contexts, random_seed, id, init_radius,
+             num_samples, num_thin, refresh, interrupt, logger, init_writers,
+             sample_writers, diagnostic_csv_writers);
+       }
+     } else if (algo_name == "hmc") {
       list_argument *metric_arg
           = dynamic_cast<list_argument *>(parser.arg("method")
                                               ->arg("sample")
@@ -649,80 +775,200 @@ int command(int argc, const char *argv[]) {
         int max_depth
             = get_arg_val<int_argument>(parser, "method", "sample", "algorithm",
                                         "hmc", "engine", "nuts", "max_depth");
-        if (adapt_engaged == false) {
-          // NUTS, no adaptation
-          if (metric == "dense_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_dense_e(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_dense_e(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers);
+          if (adapt_engaged == false) {
+            // NUTS, no adaptation
+            if (metric == "dense_e" && metric_supplied == true) {
+              if (use_binary_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, interrupt, logger,
+                    init_writers, bin_sample_writers, diagnostic_csv_writers);
+              } else if (use_stanbin_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, interrupt, logger,
+                    init_writers, stanbin_sample_writers, diagnostic_csv_writers);
+              } else if (use_parquet_format || use_feather_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, arrow_sample_writers, diagnostic_csv_writers);
+             } else if (use_bevel_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, bevel_sample_writers, diagnostic_csv_writers);
+             } else if (use_arrow_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, nanoarrow_sample_writers, diagnostic_csv_writers);
+             } else {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, sample_writers, diagnostic_csv_writers);
+             }
+            } else if (metric == "dense_e") {
+              if (use_binary_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    bin_sample_writers, diagnostic_csv_writers);
+              } else if (use_stanbin_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    stanbin_sample_writers, diagnostic_csv_writers);
+              } else if (use_parquet_format || use_feather_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   arrow_sample_writers, diagnostic_csv_writers);
+             } else if (use_bevel_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   bevel_sample_writers, diagnostic_csv_writers);
+             } else if (use_arrow_format) {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   nanoarrow_sample_writers, diagnostic_csv_writers);
+             } else {
+               return_code = stan::services::sample::hmc_nuts_dense_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   sample_writers, diagnostic_csv_writers);
+             }
+            } else if (metric == "diag_e" && metric_supplied == true) {
+              if (use_binary_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, interrupt, logger,
+                    init_writers, bin_sample_writers, diagnostic_csv_writers);
+              } else if (use_stanbin_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, interrupt, logger,
+                    init_writers, stanbin_sample_writers, diagnostic_csv_writers);
+              } else if (use_parquet_format || use_feather_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, arrow_sample_writers, diagnostic_csv_writers);
+             } else if (use_bevel_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, bevel_sample_writers, diagnostic_csv_writers);
+             } else if (use_arrow_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, nanoarrow_sample_writers, diagnostic_csv_writers);
+             } else {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, metric_contexts, random_seed,
+                   id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                   refresh, stepsize, jitter, max_depth, interrupt, logger,
+                   init_writers, sample_writers, diagnostic_csv_writers);
+             }
+            } else if (metric == "diag_e") {
+              if (use_binary_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    bin_sample_writers, diagnostic_csv_writers);
+              } else if (use_stanbin_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    stanbin_sample_writers, diagnostic_csv_writers);
+              } else if (use_parquet_format || use_feather_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   arrow_sample_writers, diagnostic_csv_writers);
+             } else if (use_bevel_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   bevel_sample_writers, diagnostic_csv_writers);
+             } else if (use_arrow_format) {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   nanoarrow_sample_writers, diagnostic_csv_writers);
+             } else {
+               return_code = stan::services::sample::hmc_nuts_diag_e(
+                   model, num_chains, init_contexts, random_seed, id, init_radius,
+                   num_warmup, num_samples, num_thin, save_warmup, refresh,
+                   stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                   sample_writers, diagnostic_csv_writers);
+             }
+             } else if (metric == "unit_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_unit_e(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                     bin_sample_writers, diagnostic_csv_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_unit_e(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                     stanbin_sample_writers, diagnostic_csv_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    arrow_sample_writers, diagnostic_csv_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    bevel_sample_writers, diagnostic_csv_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    nanoarrow_sample_writers, diagnostic_csv_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_unit_e(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, interrupt, logger, init_writers,
+                    sample_writers, diagnostic_csv_writers);
+              }
             }
-          } else if (metric == "dense_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_dense_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  bin_sample_writers, diagnostic_csv_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_dense_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  sample_writers, diagnostic_csv_writers);
-            }
-          } else if (metric == "diag_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_diag_e(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_diag_e(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers);
-            }
-          } else if (metric == "diag_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_diag_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  bin_sample_writers, diagnostic_csv_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_diag_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  sample_writers, diagnostic_csv_writers);
-            }
-          } else if (metric == "unit_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_unit_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  bin_sample_writers, diagnostic_csv_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_unit_e(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, interrupt, logger, init_writers,
-                  sample_writers, diagnostic_csv_writers);
-            }
-          }
-        } else {
+          } else {
           // NUTS adaptation
           double delta = get_arg_val<real_argument>(parser, "method", "sample",
                                                     "adapt", "delta");
@@ -739,173 +985,449 @@ int command(int argc, const char *argv[]) {
           unsigned int window = get_arg_val<u_int_argument>(
               parser, "method", "sample", "adapt", "window");
 
-          if (metric == "dense_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            }
-          } else if (metric == "dense_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            }
-          } else if (metric == "diag_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
-                  model, num_chains, init_contexts, metric_contexts, random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            }
-          } else if (metric == "diag_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, bin_sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers, sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            }
-          } else if (metric == "unit_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
-                  logger, init_writers, bin_sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
-            } else {
-              return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
-                  model, num_chains, init_contexts, random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
-                  logger, init_writers, sample_writers, diagnostic_csv_writers,
-                  metric_json_writers);
+             if (metric == "dense_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                     model, num_chains, init_contexts, metric_contexts, random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, bin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                     model, num_chains, init_contexts, metric_contexts, random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, stanbin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, arrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, bevel_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, nanoarrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              }
+             } else if (metric == "dense_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, bin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, stanbin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, arrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, bevel_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, nanoarrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_dense_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              }
+             } else if (metric == "diag_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                     model, num_chains, init_contexts, metric_contexts, random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, bin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                     model, num_chains, init_contexts, metric_contexts, random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, stanbin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, arrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, bevel_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, nanoarrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, metric_contexts, random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              }
+             } else if (metric == "diag_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, bin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers, stanbin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, arrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, bevel_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, nanoarrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_diag_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers, sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              }
+             } else if (metric == "unit_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                     logger, init_writers, bin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                     model, num_chains, init_contexts, random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                     logger, init_writers, stanbin_sample_writers, diagnostic_csv_writers,
+                     metric_json_writers);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers, arrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers, bevel_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers, nanoarrow_sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              } else {
+                return_code = stan::services::sample::hmc_nuts_unit_e_adapt(
+                    model, num_chains, init_contexts, random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, max_depth, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers, sample_writers, diagnostic_csv_writers,
+                    metric_json_writers);
+              }
             }
           }
-        }
-      } else if (engine == "static") {
+        } else if (engine == "static") {
         double int_time = get_arg_val<real_argument>(
             parser, "method", "sample", "algorithm", "hmc", "engine", "static",
             "int_time");
-        if (adapt_engaged == false) {  // static, no adaptation
-          if (metric == "dense_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_dense_e(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_dense_e(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+           if (adapt_engaged == false) {  // static, no adaptation
+             if (metric == "dense_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "dense_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_dense_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "diag_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "diag_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_diag_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "unit_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_unit_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_unit_e(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                     stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_unit_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_unit_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_unit_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_unit_e(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, interrupt, logger, init_writers[0],
+                    sample_writers[0], diagnostic_csv_writers[0]);
+              }
             }
-          } else if (metric == "dense_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_dense_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_dense_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "diag_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_diag_e(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_diag_e(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "diag_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_diag_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_diag_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "unit_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_unit_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_unit_e(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, interrupt, logger, init_writers[0],
-                  sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          }
-        } else {  // static adaptation
+          } else {  // static adaptation
           double delta = get_arg_val<real_argument>(parser, "method", "sample",
                                                     "adapt", "delta");
           double gamma = get_arg_val<real_argument>(parser, "method", "sample",
@@ -920,90 +1442,230 @@ int command(int argc, const char *argv[]) {
               parser, "method", "sample", "adapt", "term_buffer");
           unsigned int window = get_arg_val<u_int_argument>(
               parser, "method", "sample", "adapt", "window");
-          if (metric == "dense_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_dense_e_adapt(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_dense_e_adapt(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "dense_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_dense_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_dense_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "diag_e" && metric_supplied == true) {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_diag_e_adapt(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_diag_e_adapt(
-                  model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
-                  id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
-                  refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "diag_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_diag_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_diag_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0,
-                  init_buffer, term_buffer, window, interrupt, logger,
-                  init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
-            }
-          } else if (metric == "unit_e") {
-            if (use_binary_format) {
-              return_code = stan::services::sample::hmc_static_unit_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
-                  logger, init_writers[0], bin_sample_writers[0],
-                  diagnostic_csv_writers[0]);
-            } else {
-              return_code = stan::services::sample::hmc_static_unit_e_adapt(
-                  model, *(init_contexts[0]), random_seed, id, init_radius,
-                  num_warmup, num_samples, num_thin, save_warmup, refresh,
-                  stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
-                  logger, init_writers[0], sample_writers[0],
-                  diagnostic_csv_writers[0]);
+             if (metric == "dense_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "dense_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_dense_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "diag_e" && metric_supplied == true) {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                     model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                     id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                     refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), *(metric_contexts[0]), random_seed,
+                    id, init_radius, num_warmup, num_samples, num_thin, save_warmup,
+                    refresh, stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "diag_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], bin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                     init_buffer, term_buffer, window, interrupt, logger,
+                     init_writers[0], stanbin_sample_writers[0], diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], arrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], bevel_sample_writers[0], diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], nanoarrow_sample_writers[0], diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_diag_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0,
+                    init_buffer, term_buffer, window, interrupt, logger,
+                    init_writers[0], sample_writers[0], diagnostic_csv_writers[0]);
+              }
+             } else if (metric == "unit_e") {
+               if (use_binary_format) {
+                 return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                     logger, init_writers[0], bin_sample_writers[0],
+                     diagnostic_csv_writers[0]);
+               } else if (use_stanbin_format) {
+                 return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                     model, *(init_contexts[0]), random_seed, id, init_radius,
+                     num_warmup, num_samples, num_thin, save_warmup, refresh,
+                     stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                     logger, init_writers[0], stanbin_sample_writers[0],
+                     diagnostic_csv_writers[0]);
+               } else if (use_parquet_format || use_feather_format) {
+                return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers[0], arrow_sample_writers[0],
+                    diagnostic_csv_writers[0]);
+              } else if (use_bevel_format) {
+                return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers[0], bevel_sample_writers[0],
+                    diagnostic_csv_writers[0]);
+              } else if (use_arrow_format) {
+                return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers[0], nanoarrow_sample_writers[0],
+                    diagnostic_csv_writers[0]);
+              } else {
+                return_code = stan::services::sample::hmc_static_unit_e_adapt(
+                    model, *(init_contexts[0]), random_seed, id, init_radius,
+                    num_warmup, num_samples, num_thin, save_warmup, refresh,
+                    stepsize, jitter, int_time, delta, gamma, kappa, t0, interrupt,
+                    logger, init_writers[0], sample_writers[0],
+                    diagnostic_csv_writers[0]);
+              }
             }
           }
-        }
-      }  // end static HMC
-    }    // ---- sample end ---- //
+        }  // end static HMC
+      }    // ---- sample end ---- //
   } else if (user_method->arg("variational")) {
     // ---- variational start ---- //
     list_argument *algo = dynamic_cast<list_argument *>(
@@ -1065,14 +1727,42 @@ int command(int argc, const char *argv[]) {
   cluster.stop_listen();
 #endif
 
-  // Finalize binary writers
-  if (use_binary_format) {
-    for (auto& bw : bin_sample_writers) {
-      bw.finalize();
+    // Finalize binary writers
+    if (use_binary_format) {
+      for (auto& bw : bin_sample_writers) {
+        bw.finalize();
+      }
     }
-  }
 
-  return return_code;
+    // Finalize Arrow (parquet/feather) writers
+    if (use_parquet_format || use_feather_format) {
+      for (auto& aw : arrow_sample_writers) {
+        aw.finalize();
+      }
+    }
+
+    // Finalize BEVE writers
+    if (use_bevel_format) {
+      for (auto& bw : bevel_sample_writers) {
+        bw.finalize();
+      }
+    }
+
+     // Finalize nanoarrow writers
+     if (use_arrow_format) {
+       for (auto& aw : nanoarrow_sample_writers) {
+         aw.finalize();
+       }
+     }
+
+     // Finalize stanbin writers
+     if (use_stanbin_format) {
+       for (auto& sw : stanbin_sample_writers) {
+         sw.finalize();
+       }
+     }
+
+     return return_code;
 }
 
 }  // namespace cmdstan

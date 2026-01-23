@@ -11,7 +11,7 @@ class arg_format : public string_argument {
   arg_format() : string_argument() {
     _name = "format";
     _description = "Output file format";
-    _validity = "csv, bin";
+    _validity = "csv, bin, stanbin, parquet, feather, beve, arrow";
     _default = "csv";
     _default_value = "csv";
     _constrained = true;
@@ -20,7 +20,8 @@ class arg_format : public string_argument {
   }
 
   bool is_valid(std::string value) override {
-    return value == "csv" || value == "bin";
+    return value == "csv" || value == "bin" || value == "stanbin" || value == "parquet"
+           || value == "feather" || value == "beve" || value == "arrow";
   }
 };
 

@@ -60,3 +60,8 @@ output*.csv
 #clangd
 compile_commands.json
 compile_flags.txt
+
+stress_test*
+test_simple*
+**/*.bin
+**/*.meta
