@@ -1,11 +1,9 @@
 #include <test/utility.hpp>
+#include <stan/io/string_utils.hpp>
 #include <gtest/gtest.h>
-#include <fstream>
 #include <string>
-#include <stdexcept>
 
 using cmdstan::test::convert_model_path;
-using cmdstan::test::multiple_command_separator;
 using cmdstan::test::parse_sample;
 using cmdstan::test::run_command;
 using cmdstan::test::run_command_output;
@@ -30,6 +28,10 @@ class CmdStan : public testing::Test {
                                        "bern_unconstrained_params_short.json"};
     bern_constrained_params_short
         = {"src", "test", "test-models", "bern_constrained_params_short.json"};
+    bern_unconstrained_params_multi_json
+        = {"src", "test", "test-models", "bern_unconstrained_multi.json"};
+    bern_unconstrained_params_multi_rdump
+        = {"src", "test", "test-models", "bern_unconstrained_multi.R"};
     test_output = {"test", "output.csv"};
     simplex_model = {"src", "test", "test-models", "simplex_model"};
     simplex_constrained_bad_csv
@@ -47,6 +49,9 @@ class CmdStan : public testing::Test {
   std::vector<std::string> bern_constrained_params_csv;
   std::vector<std::string> bern_unconstrained_params_short;
   std::vector<std::string> bern_constrained_params_short;
+  std::vector<std::string> bern_unconstrained_params_multi_json;
+  std::vector<std::string> bern_unconstrained_params_multi_rdump;
+
   std::vector<std::string> test_output;
   std::vector<std::string> simplex_model;
   std::vector<std::string> simplex_constrained_csv;
@@ -67,12 +72,34 @@ TEST_F(CmdStan, log_prob_uparams_rdump) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   ASSERT_EQ(values.size() % names.size(), 0);
   ASSERT_EQ(names[0].compare(0, 2, std::string("lp")), 0);
   ASSERT_EQ(names[1].compare(0, 2, std::string("g_")), 0);
+
+  ASSERT_FLOAT_EQ(values[0], -26.1950918);
+}
+
+TEST_F(CmdStan, log_prob_uparams_multi_rdump) {
+  std::stringstream ss;
+  ss << convert_model_path(bern_log_prob_model)
+     << " data file=" << convert_model_path(bern_data)
+     << " output file=" << convert_model_path(test_output)
+     << " method=log_prob unconstrained_params="
+     << convert_model_path(bern_unconstrained_params_multi_rdump);
+  std::string cmd = ss.str();
+  run_command_output out = run_command(cmd);
+  ASSERT_FALSE(out.hasError);
+  std::vector<std::string> config;
+  std::vector<std::string> header;
+  std::vector<double> values;
+  parse_sample(convert_model_path(test_output), config, header, values);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
+  ASSERT_EQ(values.size() % names.size(), 0);
+
+  // log_p values calculated externally
+  ASSERT_FLOAT_EQ(values[0], -14.90125);
+  ASSERT_FLOAT_EQ(values[names.size()], -17.19926);
 }
 
 TEST_F(CmdStan, log_prob_cparams_rdump) {
@@ -89,10 +116,10 @@ TEST_F(CmdStan, log_prob_cparams_rdump) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   ASSERT_TRUE(values.size() % names.size() == 0);
+
+  ASSERT_FLOAT_EQ(values[0], -26.1950918);
 }
 
 TEST_F(CmdStan, log_prob_uparams_json) {
@@ -109,10 +136,32 @@ TEST_F(CmdStan, log_prob_uparams_json) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   ASSERT_EQ(values.size() % names.size(), 0);
+
+  ASSERT_FLOAT_EQ(values[0], -26.1950918);
+}
+
+TEST_F(CmdStan, log_prob_uparams_multi_json) {
+  std::stringstream ss;
+  ss << convert_model_path(bern_log_prob_model)
+     << " data file=" << convert_model_path(bern_data)
+     << " output file=" << convert_model_path(test_output)
+     << " method=log_prob unconstrained_params="
+     << convert_model_path(bern_unconstrained_params_multi_json);
+  std::string cmd = ss.str();
+  run_command_output out = run_command(cmd);
+  ASSERT_FALSE(out.hasError);
+  std::vector<std::string> config;
+  std::vector<std::string> header;
+  std::vector<double> values;
+  parse_sample(convert_model_path(test_output), config, header, values);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
+  ASSERT_EQ(values.size() % names.size(), 0);
+
+  // log_p values calculated externally
+  ASSERT_FLOAT_EQ(values[0], -24.528835);
+  ASSERT_FLOAT_EQ(values[names.size()], -35.035283);
 }
 
 TEST_F(CmdStan, log_prob_cparams_json) {
@@ -129,10 +178,9 @@ TEST_F(CmdStan, log_prob_cparams_json) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   ASSERT_EQ(values.size() % names.size(), 0);
+  ASSERT_FLOAT_EQ(values[0], -26.1950918);
 }
 
 TEST_F(CmdStan, log_prob_cparams_csv) {
@@ -151,9 +199,7 @@ TEST_F(CmdStan, log_prob_cparams_csv) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   ASSERT_EQ(values.size() % names.size(), 0);
   ASSERT_EQ(names[0].compare(0, 2, std::string("lp")), 0);
   ASSERT_EQ(names[1].compare(std::string("g_theta")), 0);
@@ -196,9 +242,7 @@ TEST_F(CmdStan, log_prob_constrained_simplex) {
   std::vector<std::string> header;
   std::vector<double> values;
   parse_sample(convert_model_path(test_output), config, header, values);
-  std::vector<std::string> names;
-  boost::split(names, header[0], boost::is_any_of(","),
-               boost::token_compress_on);
+  std::vector<std::string> names = stan::io::split(header[0], ",", true);
   // param is 3-array of 3-simplex, unconstrained params size == 6 + lp__
   ASSERT_EQ(names.size(), 7);
   ASSERT_EQ(values.size() % names.size(), 0);

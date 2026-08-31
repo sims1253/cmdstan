@@ -1,6 +1,5 @@
 #include <test/utility.hpp>
 #include <stan/mcmc/chains.hpp>
-#include <boost/algorithm/string.hpp>
 #include <gtest/gtest.h>
 #include <fstream>
 
@@ -52,17 +51,19 @@ TEST_F(CmdStan, optimize_default) {
 
   int algo_idx = idx_first_match(config, algorithm);
   EXPECT_NE(algo_idx, -1);
-  EXPECT_TRUE(boost::contains(config[algo_idx], "(Default)"));
+  EXPECT_TRUE(stan::io::contains(config[algo_idx], "(Default)"));
 
   int jacobian_idx = idx_first_match(config, jacobian);
   EXPECT_NE(jacobian_idx, -1);
-  EXPECT_TRUE(boost::contains(config[jacobian_idx], "= false (Default)"));
+  EXPECT_TRUE(stan::io::contains(config[jacobian_idx], "= false (Default)"));
 
   ASSERT_NEAR(0, values[0], 0.00001);
-  EXPECT_FLOAT_EQ(1, values[1]);
-  EXPECT_FLOAT_EQ(100, values[2]);
-  EXPECT_FLOAT_EQ(10000, values[3]);
-  EXPECT_FLOAT_EQ(1000000, values[4]);
+  auto outputs = values.size();
+
+  EXPECT_FLOAT_EQ(1, values[outputs - 4]);
+  EXPECT_FLOAT_EQ(100, values[outputs - 3]);
+  EXPECT_FLOAT_EQ(10000, values[outputs - 2]);
+  EXPECT_FLOAT_EQ(1000000, values[outputs - 1]);
 }
 
 TEST_F(CmdStan, optimize_bfgs) {
@@ -81,14 +82,16 @@ TEST_F(CmdStan, optimize_bfgs) {
 
   int algo_idx = idx_first_match(config, algorithm);
   EXPECT_NE(algo_idx, -1);
-  EXPECT_TRUE(boost::contains(config[algo_idx], "bfgs"));
-  EXPECT_FALSE(boost::contains(config[algo_idx], "lbfgs"));
+  EXPECT_TRUE(stan::io::contains(config[algo_idx], "bfgs"));
+  EXPECT_FALSE(stan::io::contains(config[algo_idx], "lbfgs"));
 
   ASSERT_NEAR(0, values[0], 0.00001);
-  EXPECT_FLOAT_EQ(1, values[1]);
-  EXPECT_FLOAT_EQ(100, values[2]);
-  EXPECT_FLOAT_EQ(10000, values[3]);
-  EXPECT_FLOAT_EQ(1000000, values[4]);
+  auto outputs = values.size();
+
+  EXPECT_FLOAT_EQ(1, values[outputs - 4]);
+  EXPECT_FLOAT_EQ(100, values[outputs - 3]);
+  EXPECT_FLOAT_EQ(10000, values[outputs - 2]);
+  EXPECT_FLOAT_EQ(1000000, values[outputs - 1]);
 }
 
 TEST_F(CmdStan, optimize_lbfgs) {
@@ -107,13 +110,15 @@ TEST_F(CmdStan, optimize_lbfgs) {
 
   int algo_idx = idx_first_match(config, algorithm);
   EXPECT_NE(algo_idx, -1);
-  EXPECT_TRUE(boost::contains(config[algo_idx], "lbfgs"));
+  EXPECT_TRUE(stan::io::contains(config[algo_idx], "lbfgs"));
 
   ASSERT_NEAR(0, values[0], 0.00001);
-  EXPECT_FLOAT_EQ(1, values[1]);
-  EXPECT_FLOAT_EQ(100, values[2]);
-  EXPECT_FLOAT_EQ(10000, values[3]);
-  EXPECT_FLOAT_EQ(1000000, values[4]);
+  auto outputs = values.size();
+
+  EXPECT_FLOAT_EQ(1, values[outputs - 4]);
+  EXPECT_FLOAT_EQ(100, values[outputs - 3]);
+  EXPECT_FLOAT_EQ(10000, values[outputs - 2]);
+  EXPECT_FLOAT_EQ(1000000, values[outputs - 1]);
 }
 
 TEST_F(CmdStan, optimize_newton) {
@@ -132,13 +137,15 @@ TEST_F(CmdStan, optimize_newton) {
 
   int algo_idx = idx_first_match(config, algorithm);
   EXPECT_NE(algo_idx, -1);
-  EXPECT_TRUE(boost::contains(config[algo_idx], "newton"));
+  EXPECT_TRUE(stan::io::contains(config[algo_idx], "newton"));
 
   ASSERT_NEAR(0, values[0], 0.00001);
-  EXPECT_FLOAT_EQ(1, values[1]);
-  EXPECT_FLOAT_EQ(100, values[2]);
-  EXPECT_FLOAT_EQ(10000, values[3]);
-  EXPECT_FLOAT_EQ(1000000, values[4]);
+  auto outputs = values.size();
+
+  EXPECT_FLOAT_EQ(1, values[outputs - 4]);
+  EXPECT_FLOAT_EQ(100, values[outputs - 3]);
+  EXPECT_FLOAT_EQ(10000, values[outputs - 2]);
+  EXPECT_FLOAT_EQ(1000000, values[outputs - 1]);
 }
 
 TEST_F(CmdStan, optimize_jacobian_adjust) {
@@ -156,10 +163,11 @@ TEST_F(CmdStan, optimize_jacobian_adjust) {
 
   int jacobian_idx = idx_first_match(config1, jacobian);
   EXPECT_NE(jacobian_idx, -1);
-  EXPECT_TRUE(boost::contains(config1[jacobian_idx], "= false (Default)"));
+  EXPECT_TRUE(stan::io::contains(config1[jacobian_idx], "= false (Default)"));
 
+  auto outputs = values1.size();
   ASSERT_NEAR(0, values1[0], 0.00001);
-  ASSERT_NEAR(3, values1[1], 0.01);
+  ASSERT_NEAR(3, values1[outputs - 1], 0.01);
 
   ss.str(std::string());
   ss << convert_model_path(simple_jacobian_model) << " random seed=1234"
@@ -174,7 +182,7 @@ TEST_F(CmdStan, optimize_jacobian_adjust) {
 
   jacobian_idx = idx_first_match(config2, jacobian);
   EXPECT_NE(jacobian_idx, -1);
-  EXPECT_TRUE(boost::contains(config2[jacobian_idx], "= true"));
+  EXPECT_TRUE(stan::io::contains(config2[jacobian_idx], "= true"));
 
-  ASSERT_NEAR(3.3, values2[1], 0.01);
+  ASSERT_NEAR(3.3, values2[outputs - 1], 0.01);
 }

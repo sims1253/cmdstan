@@ -29,7 +29,7 @@
 #include <cmdstan/io/async_stanbin_writer.hpp>
 #include <cmdstan/io/async_csv_writer.hpp>
 #include <stan/io/dump.hpp>
-#include <stan/io/ends_with.hpp>
+#include <stan/io/string_utils.hpp>
 #include <stan/io/stan_csv_reader.hpp>
 #include <stan/io/json/json_data.hpp>
 #include <stan/model/model_base.hpp>
@@ -496,7 +496,7 @@ int command(int argc, const char *argv[]) {
     }
     return_code = stan::services::standalone_generate(
         model, num_chains, fitted_params_vec, random_seed, interrupt, logger,
-        sample_writers);
+        sample_writers, id);
     // ---- generate_quantities end ---- //
   } else if (user_method->arg("laplace")) {
     // ---- laplace start ---- //
